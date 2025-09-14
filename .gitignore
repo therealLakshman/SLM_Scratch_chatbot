@@ -2,3 +2,4 @@ SLM_01/
 __pycache__/
 *.py[cod]
 slm_backend/best_model_params.pt
+*:Zone.Identifier
