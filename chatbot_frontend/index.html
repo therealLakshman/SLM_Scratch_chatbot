@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SLM Chatbot</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Simple scrollbar styling for a cleaner look */
+        #chat-container::-webkit-scrollbar {
+            width: 8px;
+        }
+        #chat-container::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+        #chat-container::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 4px;
+        }
+        #chat-container::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+        .chat-bubble {
+            opacity: 0;
+            transform: translateY(20px);
+            animation: pop-in 0.3s forwards;
+        }
+        @keyframes pop-in {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center h-screen font-sans">
+    <div class="w-full max-w-2xl h-full md:h-[90vh] flex flex-col bg-white shadow-2xl rounded-lg">
+        <!-- Header -->
+        <header class="bg-blue-600 text-white p-4 rounded-t-lg shadow-md">
+            <h1 class="text-2xl font-bold text-center">My Custom SLM Chatbot</h1>
+            <p class="text-sm text-center text-blue-200">Powered by a model trained from scratch</p>
+        </header>
+
+        <!-- Chat Messages Container -->
+        <main id="chat-container" class="flex-1 p-6 overflow-y-auto">
+            <!-- Example Bot Message -->
+            <div class="flex justify-start mb-4 chat-bubble">
+                <div class="bg-gray-200 text-gray-800 p-3 rounded-lg max-w-lg">
+                    <p class="font-bold mb-1">SLM Bot</p>
+                    <p>Hello! I'm a language model you built. What would you like to talk about or create today?</p>
+                </div>
+            </div>
+        </main>
+
+        <!-- Input Area -->
+        <footer class="p-4 bg-white border-t border-gray-200 rounded-b-lg">
+            <form id="chat-form" class="flex items-center space-x-4">
+                <input 
+                    type="text" 
+                    id="message-input"
+                    placeholder="Type your message here..."
+                    autocomplete="off"
+                    class="flex-1 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition"
+                >
+                <button 
+                    type="submit"
+                    id="send-button"
+                    class="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 active:scale-95 transition shadow-md flex items-center"
+                >
+                    <span id="button-text">Send</span>
+                    <!-- Spinner Icon for loading state -->
+                    <svg id="spinner" class="animate-spin h-5 w-5 text-white hidden ml-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                </button>
+            </form>
+        </footer>
+    </div>
+
+    <script>
+        const chatForm = document.getElementById('chat-form');
+        const messageInput = document.getElementById('message-input');
+        const chatContainer = document.getElementById('chat-container');
+        const sendButton = document.getElementById('send-button');
+        const buttonText = document.getElementById('button-text');
+        const spinner = document.getElementById('spinner');
+
+        // The URL of your local FastAPI backend server
+        const API_URL = 'http://127.0.0.1:8000/generate';
+
+        chatForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const message = messageInput.value.trim();
+            if (!message) return;
+
+            // Display the user's message
+            addMessage(message, 'user');
+            messageInput.value = '';
+
+            // Show loading state
+            setLoading(true);
+
+            try {
+                // Send the message to the backend API
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ text: message }),
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                
+                // The backend returns the original prompt plus the new text.
+                // We need to extract just the newly generated part.
+                const fullResponse = data.response;
+                const generatedText = fullResponse.substring(message.length).trim();
+
+                addMessage(generatedText, 'bot');
+
+            } catch (error) {
+                console.error('Error fetching from API:', error);
+                addMessage('Sorry, I seem to be having trouble connecting to my brain. Please check the backend server and try again.', 'bot', true);
+            } finally {
+                // Hide loading state
+                setLoading(false);
+            }
+        });
+
+        function addMessage(text, sender, isError = false) {
+            const messageWrapper = document.createElement('div');
+            messageWrapper.classList.add('flex', 'mb-4', 'chat-bubble');
+
+            const messageDiv = document.createElement('div');
+            messageDiv.classList.add('p-3', 'rounded-lg', 'max-w-lg');
+            
+            const senderName = document.createElement('p');
+            senderName.classList.add('font-bold', 'mb-1');
+
+            const messageText = document.createElement('p');
+            messageText.textContent = text;
+            
+            if (sender === 'user') {
+                messageWrapper.classList.add('justify-end');
+                messageDiv.classList.add('bg-blue-600', 'text-white');
+                senderName.textContent = 'You';
+            } else {
+                messageWrapper.classList.add('justify-start');
+                senderName.textContent = 'SLM Bot';
+                if (isError) {
+                    messageDiv.classList.add('bg-red-200', 'text-red-800');
+                } else {
+                    messageDiv.classList.add('bg-gray-200', 'text-gray-800');
+                }
+            }
+
+            messageDiv.appendChild(senderName);
+            messageDiv.appendChild(messageText);
+            messageWrapper.appendChild(messageDiv);
+            chatContainer.appendChild(messageWrapper);
+
+            // Scroll to the bottom of the chat
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function setLoading(isLoading) {
+            if (isLoading) {
+                sendButton.disabled = true;
+                buttonText.classList.add('hidden');
+                spinner.classList.remove('hidden');
+            } else {
+                sendButton.disabled = false;
+                buttonText.classList.remove('hidden');
+                spinner.classList.add('hidden');
+                messageInput.focus();
+            }
+        }
+    </script>
+</body>
+</html>
+
