@@ -6,11 +6,6 @@ from dataclasses import dataclass
 import tiktoken
 import os
 
-# -----------------------------------------------------------------------------
-# All the classes below are taken from "SLM_from_scratch.ipynb" notebook.
-# They define the architecture of Small Language Model.
-# -----------------------------------------------------------------------------
-
 class LayerNorm(nn.Module):
     """ A custom LayerNorm module. """
     def __init__(self, ndim, bias):
@@ -26,25 +21,20 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        # Key, query, value projections for all heads, but in a batch
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        # Output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        # Regularization
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
-        # Flash Attention is a faster implementation of self-attention
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
-            # Manual implementation of the causal mask
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x):
-        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
-        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
+        B, T, C = x.size()
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
@@ -66,9 +56,9 @@ class MLP(nn.Module):
     """ The Feed-Forward Network part of the Transformer block. """
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.gelu    = nn.GELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.gelu = nn.GELU()
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
@@ -94,23 +84,19 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    """ The configuration class for the GPT model. """
-    block_size: int = 256
-    vocab_size: int = 50304
+    block_size: int = 128
+    vocab_size: int = 50257
     n_layer: int = 6
     n_head: int = 6
     n_embd: int = 384
-    dropout: float = 0.0
+    dropout: float = 0.1
     bias: bool = True
 
 class GPT(nn.Module):
     """ The full GPT model. """
     def __init__(self, config):
         super().__init__()
-        assert config.vocab_size is not None
-        assert config.block_size is not None
         self.config = config
-
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
@@ -119,76 +105,94 @@ class GPT(nn.Module):
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.transformer.wte.weight = self.lm_head.weight # Weight tying
+        self.transformer.wte.weight = self.lm_head.weight
 
     def forward(self, idx, targets=None):
         device = idx.device
         b, t = idx.size()
         pos = torch.arange(0, t, dtype=torch.long, device=device)
-
         tok_emb = self.transformer.wte(idx)
         pos_emb = self.transformer.wpe(pos)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
-
         logits = self.lm_head(x)
-        return logits, None # Inference doesn't need loss
+        return logits, None
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_p=0.9, top_k=None, repetition_penalty=1.1):
         for _ in range(max_new_tokens):
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :] / temperature
+
+            # Apply repetition penalty
+            if repetition_penalty != 1.0:
+                for token_id in set(idx_cond[0].tolist()):
+                    if logits[0, token_id] > 0:
+                        logits[0, token_id] /= repetition_penalty
+                    else:
+                        logits[0, token_id] *= repetition_penalty  # Avoid amplifying negative logits
+
+            # Apply top_k sampling
             if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
+                top_k_logits, top_k_indices = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits = torch.full_like(logits, -float('Inf'))
+                logits.scatter_(1, top_k_indices, top_k_logits)
+
+            # Apply top_p sampling
+            if top_p is not None:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                logits[indices_to_remove] = -float('Inf')
+
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
+            
+            if idx_next == 50256:  # Stop at <|endoftext|>
+                break
+                
             idx = torch.cat((idx, idx_next), dim=1)
         return idx
+
 class Chatbot:
-    """ A wrapper class to handle model loading and text generation. """
     def __init__(self, model_weights_path="best_model_params.pt"):
-        self.device = "cpu" # Force CPU for broad compatibility during inference
-
-        # Initialize tokenizer
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.enc = tiktoken.get_encoding("gpt2")
-
-        # Define model configuration based on your training script
-        config = GPTConfig(
-            vocab_size=50257,
-            block_size=128,
-            n_layer=6,
-            n_head=6,
-            n_embd=384,
-            dropout=0.1,
-            bias=True
-        )
-
-        # Instantiate the model
+        config = GPTConfig(vocab_size=50257, block_size=128, n_layer=6, n_head=6, n_embd=384, dropout=0.1, bias=True)
         self.model = GPT(config)
-
-        # Load the trained weights
-        # The map_location='cpu' ensures the model loads even on a machine without a GPU
         if not os.path.exists(model_weights_path):
-             raise FileNotFoundError(f"Error: Model weights file not found at {model_weights_path}. "
-                                     f"Please run the Colab notebook and place 'best_model_params.pt' in the 'slm_backend' directory.")
-
+            raise FileNotFoundError(f"Model weights not found at {model_weights_path}.")
         self.model.load_state_dict(torch.load(model_weights_path, map_location=self.device))
         self.model.to(self.device)
-        self.model.eval() # Set the model to evaluation mode
+        self.model.eval()
 
-    def generate_response(self, prompt_text: str, max_new_tokens: int = 100) -> str:
-        """ Takes a text prompt and returns the model's generated response. """
-        start_ids = self.enc.encode(prompt_text, allowed_special={"<|endoftext|>"})
-        x = (torch.tensor(start_ids, dtype=torch.long, device=self.device)[None, ...])
-
-        # Generate the response
+    def generate_response(self, prompt_text: str, max_new_tokens: int = 200) -> str:
+        # Format prompt to align with TinyStories narrative style
+        formatted_prompt = f"Once upon a time, {prompt_text}\nResponse:"
+        start_ids = self.enc.encode(formatted_prompt, allowed_special={"<|endoftext|>"})
+        x = torch.tensor(start_ids, dtype=torch.long, device=self.device)[None, ...]
+        
         with torch.no_grad():
-            y = self.model.generate(x, max_new_tokens=max_new_tokens)
+            y = self.model.generate(x, max_new_tokens=max_new_tokens, temperature=0.7, top_p=0.95, top_k=40, repetition_penalty=1.2)
+            
+            # Decode and clean the output
             response_ids = y[0].tolist()
-            response_text = self.enc.decode(response_ids)
+            generated_ids = response_ids[len(start_ids):]
+            
+            # Trim at EOS or first period
+            try:
+                stop_index = generated_ids.index(50256)
+                generated_ids = generated_ids[:stop_index]
+            except ValueError:
+                pass
+            
+            response_text = self.enc.decode(generated_ids)
+            # Trim at first period for natural stopping if no EOS
+            response_text = response_text.split('.')[0].strip() if '.' in response_text else response_text.strip()
             return response_text
