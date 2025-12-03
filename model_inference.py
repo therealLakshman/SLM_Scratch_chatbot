@@ -5,8 +5,7 @@ import math
 from dataclasses import dataclass
 import tiktoken
 import os
-from peft import PeftModel  
-
+from peft import PeftModel, PeftConfig
 
 class LayerNorm(nn.Module):
     """ A custom LayerNorm module. """
@@ -162,50 +161,52 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
         return idx
 
-# ============================== CHATBOT CLASS ==============================
 class Chatbot:
     def __init__(self, 
-                 base_weights_path="/root/GenAI_projects/SLM_Scratch_chatbot/slm_backend/best_model_params.pt",
-                 lora_path="/root/GenAI_projects/SLM_Scratch_chatbot/slm_backend/story_slm_instructtune"):  # folder from instruct_tune.py
+                 base_model_path="/root/GenAI_projects/SLM_Scratch_chatbot/slm_backend/best_model_params.pt",
+                 peft_model_path="/root/GenAI_projects/SLM_Scratch_chatbot/slm_backend/story_slm_instruct_tune_peft"):
+        
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.enc = tiktoken.get_encoding("gpt2")
         
+        print("Loading base model...")
         # Load base model
         config = GPTConfig()
         base_model = GPT(config)
-        base_model.load_state_dict(torch.load(base_weights_path, map_location=self.device))
+        base_model.load_state_dict(torch.load(base_model_path, map_location=self.device))
         base_model.to(self.device)
-        base_model.eval()
         
-        # Load LoRA adapters on top
-        self.model = PeftModel.from_pretrained(base_model, lora_path)
-        self.model.to(self.device)
+        print("Loading Peft model...")
+        # Load Peft model
+        self.model = PeftModel.from_pretrained(base_model, peft_model_path)
         self.model.eval()
-        print("🎉 Children's Story SLM loaded successfully!")
+        
+        print("Model loaded successfully!")
 
-    def generate_response(self, prompt_text: str, max_new_tokens: int = 300) -> str:
-        formatted = f"Instruction:{prompt_text}\n\nResponse:"
+    def generate_response(self, prompt_text: str, max_new_tokens: int = 150) -> str:
+        formatted = f"Instruction: {prompt_text}\n\nResponse:"
         start_ids = self.enc.encode(formatted, allowed_special={"<|endoftext|>"})
-        x = torch.tensor(start_ids, dtype=torch.long, device=self.device)[None, ...]
+        x = torch.tensor(start_ids, dtype=torch.long, device=self.device).unsqueeze(0)
         
         with torch.no_grad():
-            y = self.model.generate(x, max_new_tokens=max_new_tokens,
-                                    temperature=0.5, top_p=0.9, top_k=30, repetition_penalty=1.5)
-            
-        response_ids = y[0].tolist()[len(start_ids):]
-        try:
-            stop = response_ids.index(50256)
-            response_ids = response_ids[:stop]
-        except ValueError:
-            pass
+            y = self.model.generate(
+                x, 
+                max_new_tokens=max_new_tokens,
+                temperature=0.6,
+                top_k=30,
+                repetition_penalty=1.5
+            )
+        
+        full_output = y[0].tolist()
+        response_ids = full_output[len(start_ids):]
+        
+        if 50256 in response_ids:
+            response_ids = response_ids[:response_ids.index(50256)]
         
         response = self.enc.decode(response_ids).strip()
-        # Clean up any leftover formatting
-        if "Instruction:" in response:
-            response = response.split("Response:")[-1]
-        return response.strip()
+        return response
 
-# ============================== QUICK TEST ==============================
+# Test the model
 if __name__ == "__main__":
     bot = Chatbot()
     while True:

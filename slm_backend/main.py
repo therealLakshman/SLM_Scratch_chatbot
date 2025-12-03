@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from model_inference import Chatbot
+from model_inference2 import Chatbot
 
 # Initialize the FastAPI application
 app = FastAPI(title="SLM Chatbot API", description="An API for a custom Small Language Model.")
